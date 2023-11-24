@@ -16,13 +16,15 @@
 #include "freertos/timers.h"
 #include "mqtt_client.h"
 #include "DHT.h"
+#include "cJSON.h"
 
 
 // Define MQTT Broker settings
 #define MQTT_BROKER_URI "mqtt://test.mosquitto.org" // Replace with your MQTT broker address
-#define DEBUG_TOPIC "MQTT_DEBUG_FGA"
-#define PUBLISH_TOPIC "MQTT_SENDER_FGA"
-#define SUBSCRIBE_TOPIC "MQTT_RECEIVER_FGA"
+#define DEBUG_TOPIC "DEBUG_FGA"
+#define PUBLISH_STATUS "STATUS_ALEXA_RESP"
+#define PUBLISH_ACTIVATION "STATUS_ACTIVATION_RESP"
+#define SUBSCRIBE_TOPIC "ALEXA_COMMANDS_MQTT"
 
 // Define GPIO pins for trigger and echo
 #define TRIGGER_PIN GPIO_NUM_23
@@ -30,18 +32,18 @@
 #define DHT_PIN GPIO_NUM_21
 
 // Define constants for speed of sound and maximum measurable distance
-#define SPEED_OF_SOUND 0.45 // Speed of sound in cm/µs
-#define MAX_DISTANCE 410       // Maximum measurable distance in cm
+#define SPEED_OF_SOUND 0.47 // Speed of sound in cm/µs
+#define MAX_DISTANCE 400       // Maximum measurable distance in cm
 
-char *ssid = "SSID";
-char *pass = "PASS";
+char *ssid = "Pankeka";
+char *pass = "*Imperatriz";
 
 
 // Monitoration Variables
-char message[100];
-char DHT[50];
-char event_m[100];
-char distance_str[30];
+char hum_g[50];
+char temp_g[50];
+char event_m[150];
+char distance_str[50];
 
 
 SemaphoreHandle_t wifi_connected;
@@ -75,7 +77,7 @@ static esp_err_t mqtt_event_handler_cb(esp_mqtt_event_handle_t event) {
 
         // Message Check for Tasks
             xSemaphoreGive(task_handle);
-            if(strcmp(event_m, "Health Check") == 0){
+            if(strcmp(event_m, "get_status") == 0){
                 ESP_LOGI("HEALTH CHECK", "=== START HC ===");
                 //Run sensor Reads and return via MQTT
                 //Read Ultrasound sensor
@@ -87,11 +89,23 @@ static esp_err_t mqtt_event_handler_cb(esp_mqtt_event_handle_t event) {
                         xTaskCreate(DHT_task, "DHT_task", 2048, NULL, 10, NULL);
                         if(xSemaphoreTake(task_handle, portMAX_DELAY)){
                             //Organize message and publish
-                            strcpy(message, distance_str);
-                            strcat(message, DHT);
+                            cJSON *json_root = cJSON_CreateObject();
+                            cJSON_AddStringToObject(json_root, "temperature", temp_g);
+                            cJSON_AddStringToObject(json_root, "humiity", hum_g);
+                            cJSON_AddStringToObject(json_root, "reservatory_level", distance_str);
 
-                            ESP_LOGW("DEBUG", "%s", message);
-                            esp_mqtt_client_publish(mqtt_client, PUBLISH_TOPIC, message, 0, 1, 0);
+
+                            // Convert cJSON object to a string
+                            char *json_str = cJSON_Print(json_root);
+
+                            // Publish the JSON string
+                            esp_mqtt_client_publish(mqtt_client, PUBLISH_STATUS, json_str, 0, 1, 0);
+
+                            // Free cJSON and JSON string
+                            ESP_LOGW("DEBUG", "%s", json_str);
+
+                            cJSON_Delete(json_root);
+                            free(json_str);
                             xSemaphoreGive(task_handle);
 
                             ESP_LOGI("HEALTH CHECK", "=== Finished HC ===\n\n\n");
@@ -102,6 +116,7 @@ static esp_err_t mqtt_event_handler_cb(esp_mqtt_event_handle_t event) {
                 
             }else if(strcmp(event_m, "Start Run") == 0){
                 //Run Motor
+                esp_mqtt_client_publish(mqtt_client, PUBLISH_ACTIVATION, "active", 0, 1, 0);
             }else{
                 // Publish error Code
             }
@@ -160,7 +175,7 @@ static void read_distance_task(void *pvParameters) {
 
     total = total/10;
     ESP_LOGI("HEALTH CHECK", "%d cm\n", total);
-    sprintf(distance_str, "HR: %d cm ", total);
+    sprintf(distance_str, "%d", total);
 
     ESP_LOGI("HEALTH CHECK", "End HR-SC04 Task");
     
@@ -176,6 +191,8 @@ void DHT_task(void *pvParameter)
     setDHTgpio(DHT_PIN);
     ESP_LOGI("HEALTH CHECK", "Starting DHT22 Task\n\n");
 
+    vTaskDelay(2000  /portTICK_PERIOD_MS);
+
     int ret = readDHT();
 
     errorHandler(ret);
@@ -183,13 +200,9 @@ void DHT_task(void *pvParameter)
     temp = getTemperature();
 
     ESP_LOGI("HEALTH CHECK", "DHT\nHum: %.1f Tmp: %.1f\n", hum, temp);
-
-    vTaskDelay(2000  /portTICK_PERIOD_MS);
-
-    char info_string[30];
-    sprintf(info_string, "Hum: %.1f Temp: %.1f", hum, temp);
-
-    strcpy(DHT, info_string);
+    
+    sprintf(temp_g, "%.1f", temp);
+    sprintf(hum_g, "%.1f", hum);
 
     
     ESP_LOGI("HEALTH CHECK", "Finished DHT22 Task\n\n");
