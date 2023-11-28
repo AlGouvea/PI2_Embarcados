@@ -27,13 +27,14 @@
 #define SUBSCRIBE_TOPIC "ALEXA_COMMANDS_MQTT"
 
 // Define GPIO pins for trigger and echo
-#define TRIGGER_PIN GPIO_NUM_23
-#define ECHO_PIN GPIO_NUM_22
+#define TRIGGER_PIN GPIO_NUM_5
+#define ECHO_PIN GPIO_NUM_18
 #define DHT_PIN GPIO_NUM_21
 
 // Define constants for speed of sound and maximum measurable distance
-#define SPEED_OF_SOUND 0.47 // Speed of sound in cm/µs
+#define SPEED_OF_SOUND 0.0045 // Speed of sound in cm/µs
 #define MAX_DISTANCE 400       // Maximum measurable distance in cm
+#define MIN_DISTANCE 2
 
 char *ssid = "Pankeka";
 char *pass = "*Imperatriz";
@@ -82,17 +83,25 @@ static esp_err_t mqtt_event_handler_cb(esp_mqtt_event_handle_t event) {
                 //Run sensor Reads and return via MQTT
                 //Read Ultrasound sensor
                 if(xSemaphoreTake(task_handle, portMAX_DELAY)){
-                    xTaskCreate(read_distance_task, "read_distance_task", 2048, NULL, 10, NULL);
+                    xTaskCreate(DHT_task, "DHT_task", 2048, NULL, 10, NULL);
 
                     if(xSemaphoreTake(task_handle, portMAX_DELAY)){
                         //Read Temperature and Humidity
-                        xTaskCreate(DHT_task, "DHT_task", 2048, NULL, 10, NULL);
+                        xTaskCreate(read_distance_task, "read_distance_task", 2048, NULL, 10, NULL);
                         if(xSemaphoreTake(task_handle, portMAX_DELAY)){
                             //Organize message and publish
                             cJSON *json_root = cJSON_CreateObject();
                             cJSON_AddStringToObject(json_root, "temperature", temp_g);
-                            cJSON_AddStringToObject(json_root, "humiity", hum_g);
+                            cJSON_AddStringToObject(json_root, "humidity", hum_g);
                             cJSON_AddStringToObject(json_root, "reservatory_level", distance_str);
+
+                            if(error == 1){
+                                cJSON_AddStringToObject(json_root, "error_code", "1");
+                            }else if(error == 2){
+                                cJSON_AddStringToObject(json_root, "error_code", "2");
+                            }else{
+                                cJSON_AddStringToObject(json_root, "error_code", "0");
+                            }
 
 
                             // Convert cJSON object to a string
@@ -114,8 +123,9 @@ static esp_err_t mqtt_event_handler_cb(esp_mqtt_event_handle_t event) {
                     }
                 }
                 
-            }else if(strcmp(event_m, "Start Run") == 0){
+            }else if(strcmp(event_m, "turn_on") == 0){
                 //Run Motor
+                ESP_LOGW("MOTOR ACTIVATION", "STARTING RUN");
                 esp_mqtt_client_publish(mqtt_client, PUBLISH_ACTIVATION, "active", 0, 1, 0);
             }else{
                 // Publish error Code
@@ -150,7 +160,8 @@ static void trigger_sensor() {
 
 
 static void read_distance_task(void *pvParameters) {
-    int i = 0, total = 0;
+    int i = 0;
+    float total = 0;
     strcpy(distance_str, "");
     ESP_LOGI("HEALTH CHECK", "Start HR-SC04 Task");
     while (i < 10) {
@@ -158,24 +169,32 @@ static void read_distance_task(void *pvParameters) {
 
         int duration = 0;
         while (gpio_get_level(ECHO_PIN) == 0) {
-            vTaskDelay(1 / portTICK_PERIOD_MS);
+            vTaskDelay(pdMS_TO_TICKS(1.5));
         }
 
         while (gpio_get_level(ECHO_PIN) == 1) {
-            duration++;
-            vTaskDelay(1 / portTICK_PERIOD_MS);
+            duration+=100;
+            vTaskDelay(pdMS_TO_TICKS(1.5));
         }
 
-        int distance = (duration * SPEED_OF_SOUND) / 2;
+        float distance = (duration * SPEED_OF_SOUND) / 2;
 
         i++;
+        ESP_LOGE("DISTANCE", "%.2f cm\n", distance);
         total+=distance;
-        vTaskDelay(500 / portTICK_PERIOD_MS); // Delay 1 second
     }
 
     total = total/10;
-    ESP_LOGI("HEALTH CHECK", "%d cm\n", total);
-    sprintf(distance_str, "%d", total);
+
+    if(total > MAX_DISTANCE || total < MIN_DISTANCE){
+        ESP_LOGW("DISTANCE", "DISTANCE OU OF REACH");
+        error = 2;
+    }else if(error != 1){
+        error = 0;
+    }
+
+    ESP_LOGI("HEALTH CHECK", "%.2f cm\n", total);
+    sprintf(distance_str, "%.2f", total);
 
     ESP_LOGI("HEALTH CHECK", "End HR-SC04 Task");
     

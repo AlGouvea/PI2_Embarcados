@@ -31,6 +31,7 @@ static const char *TAG = "DHT";
 int DHTgpio = GPIO_NUM_4; // my default DHT pin = 4
 float humidity = 0.;
 float temperature = 0.;
+int error = 0;
 
 // == set the DHT used pin=========================================
 
@@ -53,6 +54,7 @@ void errorHandler(int response)
 
     case DHT_TIMEOUT_ERROR:
         ESP_LOGE(TAG, "Sensor Timeout\n");
+        error = 1;
         break;
 
     case DHT_CHECKSUM_ERROR:
@@ -60,6 +62,7 @@ void errorHandler(int response)
         break;
 
     case DHT_OK:
+        error = 0;
         break;
 
     default:
