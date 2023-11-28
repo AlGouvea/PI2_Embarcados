@@ -31,6 +31,13 @@
 #define ECHO_PIN GPIO_NUM_18
 #define DHT_PIN GPIO_NUM_21
 
+// Define GPIO pins for dir, step and microsteps
+#define STEP_PIN GPIO_NUM_13  // Pino de pulso (Step)
+#define DIR_PIN GPIO_NUM_12   // Pino de direção (Direction)
+#define MS1_PIN GPIO_NUM_14   // Pino MS1 do DRV8825
+#define MS2_PIN GPIO_NUM_27  // Pino MS2 do DRV8825
+#define MS3_PIN GPIO_NUM_26  // Pino MS3 do DRV8825
+
 // Define constants for speed of sound and maximum measurable distance
 #define SPEED_OF_SOUND 0.0045 // Speed of sound in cm/µs
 #define MAX_DISTANCE 400       // Maximum measurable distance in cm
@@ -50,11 +57,26 @@ char distance_str[50];
 SemaphoreHandle_t wifi_connected;
 SemaphoreHandle_t task_handle;
 int retry_num=0;
+int status = 1;
 
 
 static esp_mqtt_client_handle_t mqtt_client = NULL;
 static void read_distance_task(void *pvParameters);
 void DHT_task(void *pvParameter);
+
+void motorStep(int steps, int dir) { //Aciona o motor
+    ESP_LOGI("MOTOR", "Movendo motor de passo %d passos no sentido %s", steps, dir ? "horário" : "anti-horário");
+    gpio_set_level(DIR_PIN, dir); // Configura a direção do motor (0 para um lado, 1 para o outro)
+    for (int i = 0; i < steps; i++) {
+        gpio_set_level(STEP_PIN, 1);
+        vTaskDelay(pdMS_TO_TICKS(10)); // Atraso de 2 ms entre os pulsos (ajuste conforme necessário)
+        gpio_set_level(STEP_PIN, 0);
+        vTaskDelay(pdMS_TO_TICKS(10)); // Atraso de 2 ms entre os pulsos (ajuste conforme necessário)
+    }
+    ESP_LOGI("MOTOR", "Movimento concluído");
+}
+
+
 
 static esp_err_t mqtt_event_handler_cb(esp_mqtt_event_handle_t event) {
     strcpy(event_m, "");
@@ -126,10 +148,13 @@ static esp_err_t mqtt_event_handler_cb(esp_mqtt_event_handle_t event) {
             }else if(strcmp(event_m, "turn_on") == 0){
                 //Run Motor
                 ESP_LOGW("MOTOR ACTIVATION", "STARTING RUN");
+
+                motorStep(200, status);
+                status = !status;
+
                 esp_mqtt_client_publish(mqtt_client, PUBLISH_ACTIVATION, "active", 0, 1, 0);
-            }else{
-                // Publish error Code
             }
+            
             break;
         default:
             break;
