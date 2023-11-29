@@ -27,16 +27,24 @@
 #define SUBSCRIBE_TOPIC "ALEXA_COMMANDS_MQTT"
 
 // Define GPIO pins for trigger and echo
-#define TRIGGER_PIN GPIO_NUM_5
-#define ECHO_PIN GPIO_NUM_18
-#define DHT_PIN GPIO_NUM_21
+#define TRIGGER_PIN GPIO_NUM_13
+#define ECHO_PIN GPIO_NUM_12
+#define DHT_PIN GPIO_NUM_26
 
-// Define GPIO pins for dir, step and microsteps
-#define STEP_PIN GPIO_NUM_13  // Pino de pulso (Step)
-#define DIR_PIN GPIO_NUM_12   // Pino de direção (Direction)
-#define MS1_PIN GPIO_NUM_14   // Pino MS1 do DRV8825
-#define MS2_PIN GPIO_NUM_27  // Pino MS2 do DRV8825
-#define MS3_PIN GPIO_NUM_26  // Pino MS3 do DRV8825
+// Definição dos pinos do motor de passo, do relé e do driver
+#define PIN_STEP  GPIO_NUM_33
+#define PIN_DIR   GPIO_NUM_25
+#define PIN_RELAY GPIO_NUM_23
+#define PIN_EN    GPIO_NUM_32
+
+// Definição de pinos de fim de curso
+#define PIN_SENSOR_DIREITO GPIO_NUM_14
+#define PIN_SENSOR_ESQUERDO GPIO_NUM_27
+
+// Definição das variáveis de controle do motor
+int velocidade = 1000;  // Velocidade em microssegundos entre cada pulso (mais baixo = mais rápido)
+int rpm = 7200;       
+
 
 // Define constants for speed of sound and maximum measurable distance
 #define SPEED_OF_SOUND 0.0045 // Speed of sound in cm/µs
@@ -57,25 +65,87 @@ char distance_str[50];
 SemaphoreHandle_t wifi_connected;
 SemaphoreHandle_t task_handle;
 int retry_num=0;
-int status = 1;
+int sentido = 0;
 
 
 static esp_mqtt_client_handle_t mqtt_client = NULL;
 static void read_distance_task(void *pvParameters);
 void DHT_task(void *pvParameter);
 
-void motorStep(int steps, int dir) { //Aciona o motor
-    ESP_LOGI("MOTOR", "Movendo motor de passo %d passos no sentido %s", steps, dir ? "horário" : "anti-horário");
-    gpio_set_level(DIR_PIN, dir); // Configura a direção do motor (0 para um lado, 1 para o outro)
-    for (int i = 0; i < steps; i++) {
-        gpio_set_level(STEP_PIN, 1);
-        vTaskDelay(pdMS_TO_TICKS(10)); // Atraso de 2 ms entre os pulsos (ajuste conforme necessário)
-        gpio_set_level(STEP_PIN, 0);
-        vTaskDelay(pdMS_TO_TICKS(10)); // Atraso de 2 ms entre os pulsos (ajuste conforme necessário)
-    }
-    ESP_LOGI("MOTOR", "Movimento concluído");
+// Configuração dos pinos como saída
+void configurarPinos() {
+  gpio_config_t io_conf;
+
+  // Configuração do pino de passo
+  io_conf.pin_bit_mask = (1ULL << PIN_STEP);
+  io_conf.mode = GPIO_MODE_OUTPUT;
+  io_conf.pull_up_en = GPIO_PULLUP_DISABLE;
+  io_conf.pull_down_en = GPIO_PULLDOWN_DISABLE;
+  io_conf.intr_type = GPIO_INTR_DISABLE;
+  gpio_config(&io_conf);
+
+  // Configuração do pino de direção
+  io_conf.pin_bit_mask = (1ULL << PIN_DIR);
+  gpio_config(&io_conf);
+
+  // Configuração do pino do relé
+  io_conf.pin_bit_mask = (1ULL << PIN_RELAY);
+  gpio_config(&io_conf);
+
+  // Configuração do pino de habilitação do driver
+  io_conf.pin_bit_mask = (1ULL << PIN_EN);
+  gpio_config(&io_conf);
+
+  //Configuração dos pinos para os sensores de fim de curso
+  io_conf.pin_bit_mask = (1ULL << PIN_SENSOR_ESQUERDO) | (1ULL << PIN_SENSOR_DIREITO);
+  io_conf.mode = GPIO_MODE_INPUT;
+  io_conf.pull_up_en = GPIO_PULLUP_DISABLE;
+  io_conf.pull_down_en = GPIO_PULLDOWN_ENABLE;
+  io_conf.intr_type = GPIO_INTR_DISABLE;
+  gpio_config(&io_conf);
 }
 
+// Função para girar o motor de passo e controlar a bomba e o driver
+void controlarMotor(int sentido) {
+  // Definindo o sentido do motor
+  gpio_set_level(PIN_DIR, sentido);
+
+  // Habilitando o driver do motor (0 para habilitar)
+  gpio_set_level(PIN_EN, 0);
+
+  // Acionando o relé enquanto o carrinho estiver em movimento
+  gpio_set_level(PIN_RELAY, 1);
+
+  int passosPorMinuto = 200 * rpm;  
+  int passosPorSegundo = passosPorMinuto / 60;
+  int passosPorLoop = passosPorSegundo / portTICK_PERIOD_MS;
+
+  // Girando o motor por um segundo
+  if(sentido == 0){
+    ESP_LOGW("MOTOR", "Sentido Anti-Horario Start");
+    while(gpio_get_level(PIN_SENSOR_DIREITO) == 0 ){
+        gpio_set_level(PIN_STEP, 1);
+        esp_rom_delay_us(velocidade);
+        gpio_set_level(PIN_STEP, 0);
+        esp_rom_delay_us(velocidade);
+    }
+    ESP_LOGW("MOTOR", "Sentido Anti-Horario End");
+  }else{
+    ESP_LOGW("MOTOR", "Sentido Horario Start");
+    while(gpio_get_level(PIN_SENSOR_ESQUERDO) == 0 ){
+        gpio_set_level(PIN_STEP, 1);
+        esp_rom_delay_us(velocidade);
+        gpio_set_level(PIN_STEP, 0);
+        esp_rom_delay_us(velocidade);
+    }
+    ESP_LOGW("MOTOR", "Sentido Horario End");
+  }
+  // Desligando o relé quando o carrinho parar
+  gpio_set_level(PIN_RELAY, 0);
+
+  // Desabilitando o driver do motor (1 para desabilitar)
+  gpio_set_level(PIN_EN, 1);
+}
 
 
 static esp_err_t mqtt_event_handler_cb(esp_mqtt_event_handle_t event) {
@@ -149,8 +219,8 @@ static esp_err_t mqtt_event_handler_cb(esp_mqtt_event_handle_t event) {
                 //Run Motor
                 ESP_LOGW("MOTOR ACTIVATION", "STARTING RUN");
 
-                motorStep(200, status);
-                status = !status;
+                controlarMotor(sentido);
+                sentido = !sentido;
 
                 esp_mqtt_client_publish(mqtt_client, PUBLISH_ACTIVATION, "active", 0, 1, 0);
             }
@@ -324,6 +394,9 @@ void app_main(void)
 
     vTaskDelay(1000 /portTICK_PERIOD_MS);
 
+    // Chumbando 0 do motor (0 para habilitar)
+    gpio_set_level(PIN_EN, 1);
+
     gpio_config_t io_conf = {
         .pin_bit_mask = (1ULL << TRIGGER_PIN) | (1ULL << ECHO_PIN),
         .mode = GPIO_MODE_OUTPUT,
@@ -333,6 +406,9 @@ void app_main(void)
     io_conf.pin_bit_mask = (1ULL << ECHO_PIN);
     io_conf.mode = GPIO_MODE_INPUT;
     gpio_config(&io_conf);  
+
+    configurarPinos();
+
 
     task_handle = xSemaphoreCreateBinary();
     while(1){
